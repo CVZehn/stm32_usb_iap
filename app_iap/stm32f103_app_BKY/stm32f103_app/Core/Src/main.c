@@ -105,7 +105,7 @@ int main(void)
 		HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_14);
 		HAL_Delay(200);
 		HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_15);
-		Serial_PutString("app test start 11 \r\n");
+		Serial_PutString("app test start 112 \r\n");
 		HAL_Delay(200);
   }
   /* USER CODE END 3 */

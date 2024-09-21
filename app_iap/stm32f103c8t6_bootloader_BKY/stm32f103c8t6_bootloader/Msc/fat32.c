@@ -135,25 +135,37 @@ typedef struct
 	uint32_t chek_sum;
 }t_fw_info;
 
+typedef struct t_fat_recfw 
+{
+    uint32_t fw_addr;
+    uint32_t rfw_size;
+    uint32_t rdir_addr;
+    uint32_t is_get;
+}t_fat_recfw;
+
+
 //-------------------------------------------------------
 
 #define FAT32_DIR_ENTRY_ADDR         0x00400000
 #define FAT32_README_TXT_ADDR        0x00400600
 #define FAT32_FIRMWARE_BIN_ADDR      0x00500c00
 #define APP_INFO_MAGIC 0x47465257
-
+#define INVLAD_VALL 0xffffffff
 //-------------------------------------------------------
 
 static const char btldr_desc[] = "STM32 bootloader\nPlease drag and drop the intel hex file to this drive to update the appcode HEX 文件拖进U盘";
 static t_fw_dl_ctrl fwdl_ctrl = {APP_ADDR, 0, 0, 0}; 
 static t_fw_info g_fwInfo;
+static t_fat_recfw g_revfwInfo = {INVLAD_VALL,INVLAD_VALL,INVLAD_VALL,0};
 //-------------------------------------------------------
 
 #define FAT32_MBR_HARDCODE  1u
+#define FAT32_SECTOR_PER_CLUSTER 1
+#define FAT32_DIR_CLUSTER_NUM 2
 
 #if (FAT32_MBR_HARDCODE > 0u)
-static const uint8_t FAT32_MBR_DATA0[] = {
-    0xEB, 0xFE, 0x90, 0x4D, 0x53, 0x44, 0x4F, 0x53, 0x35, 0x2E, 0x30, 0x00, 0x02, 0x01, 0x7C, 0x11,
+static const uint8_t FAT32_MBR_DATA0[] = { /*512 sector  1cluster = 1 sector*/
+    0xEB, 0xFE, 0x90, 0x4D, 0x53, 0x44, 0x4F, 0x53, 0x35, 0x2E, 0x30, 0x00, 0x02, FAT32_SECTOR_PER_CLUSTER, 0x7C, 0x11,
     0x02, 0x00, 0x00, 0x00, 0x00, 0xF8, 0x00, 0x00, 0x3F, 0x00, 0xFF, 0x00, 0x3F, 0x00, 0x00, 0x00,
     0xC1, 0xC0, 0x03, 0x00, 0x42, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
     0x01, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -530,42 +542,56 @@ uint32_t IAP_GetRevFwSize()
 	return fwdl_ctrl.fw_size;
 }
 
+/*addr : dir entry address*/
+bool check_is_dir_entry(const uint8_t *b, uint32_t *clus_s, uint32_t *size)
+{
+    uint32_t i;
+    for(i=0; i<FAT32_SECTOR_SIZE; i+= sizeof(fat32_dir_entry_t))
+    {
+        const uint8_t *b_offset = (const uint8_t *)(b + i);
+        fat32_dir_entry_t *entry = (fat32_dir_entry_t*)b_offset;
+        
+        uint8_t *filename = entry->DIR_Name;
+
+        if(filename[8] == 'H' && filename[9] == 'E' && filename[10] == 'X')
+        {
+            *clus_s = (((uint32_t)(entry->DIR_FstClusHI)) << 16) | entry->DIR_FstClusLO;
+            *size = entry->DIR_FileSize;
+            //fw_addr_range.begin = ((clus-2) + 0x2000 ) * FAT32_SECTOR_SIZE;
+            //fw_addr_range.end = fw_addr_range.begin + entry->DIR_FileSize;       // don't know the size of HEX file
+            return !!(*size);
+        }
+    }
+    return 0;
+}
+
 bool fat32_write(const uint8_t *b, uint32_t addr)
 {
     if(addr & (FAT32_SECTOR_SIZE - 1))      // if not align ?
     {
         return false;
     }
-    if(addr < FAT32_DIR_ENTRY_ADDR)
-    {
-      // No operation
-    }
-    else if(addr == FAT32_DIR_ENTRY_ADDR)
-    {
-        uint32_t i;
-        for(i=0; i<FAT32_SECTOR_SIZE; i+= sizeof(fat32_dir_entry_t))
-        {
-            const uint8_t *b_offset = (const uint8_t *)(b + i);
-            fat32_dir_entry_t *entry = (fat32_dir_entry_t*)b_offset;
-            
-            uint8_t *filename = entry->DIR_Name;
 
-            if(filename[8] == 'H' && filename[9] == 'E' && filename[10] == 'X')
-            {
-                ihex_reset_state();
-                
-                // uint32_t clus = (((uint32_t)(entry->DIR_FstClusHI)) << 16) | entry->DIR_FstClusLO;
-              
-                // fw_addr_range.begin = ((clus-2) + 0x2000 ) * FAT32_SECTOR_SIZE;
-                // fw_addr_range.end = fw_addr_range.begin + entry->DIR_FileSize;       // don't know the size of HEX file
-            }
+    uint32_t fw_clus_s, size, dir_addr;
+    if(g_revfwInfo.is_get)
+    {
+        if (addr >= g_revfwInfo.fw_addr)
+        {
+            ihex_set_callback_func(_fat32_write_firmware);
+            ihex_parser(b, FAT32_SECTOR_SIZE);
+            printf("recv fw hex\r\n");
+		    //IAP_WriteAppBin(b, FAT32_SECTOR_SIZE);
         }
     }
-    else if(addr >= FAT32_FIRMWARE_BIN_ADDR)
+    else if (check_is_dir_entry(b, &fw_clus_s, &size))
     {
-        ihex_set_callback_func(_fat32_write_firmware);
-        ihex_parser(b, FAT32_SECTOR_SIZE);
-		//IAP_WriteAppBin(b, FAT32_SECTOR_SIZE);
+        uint32_t fw_addr = addr + (fw_clus_s -FAT32_DIR_CLUSTER_NUM)*512 * FAT32_SECTOR_PER_CLUSTER;
+        g_revfwInfo.fw_addr = fw_addr;
+        g_revfwInfo.rfw_size = size;
+        g_revfwInfo.rdir_addr = addr;
+        g_revfwInfo.is_get = 1;
+        ihex_reset_state();
+        printf("fw hex slba:%x size:%x\r\n", g_revfwInfo.fw_addr ,g_revfwInfo.rfw_size);
     }
 	else
 	{
